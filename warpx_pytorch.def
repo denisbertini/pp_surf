@@ -191,10 +191,13 @@ yum install -y rocm-hip-sdk rocm-openmp-sdk
    python3 -m pip --no-cache-dir install dask-labextension
    python3 -m pip --no-cache-dir install dask-ml    
 
-   ## Install modules needed by pytorch
-   python3 -m pip --no-cache-dir install typing-extensions
+    ## Install modules needed by pytorch
+    python3 -m pip --no-cache-dir install typing-extensions
 
-   ## Python's packaging libraries Needed for WarpX
+    ## PyTorch ROCm (latest)
+    python3 -m pip --no-cache-dir install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm7.2.2
+
+    ## Python's packaging libraries Needed for WarpX
    python3 -m pip --no-cache-dir install build packaging setuptools wheel
    python3 -m pip --no-cache-dir install cmake 
    python3 -m pip --no-cache-dir install periodictable numba
