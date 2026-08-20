@@ -1,0 +1,104 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/pytorch:25.01-py3
+
+%post
+    # -----------------------------------------------------------------
+    # System dependencies
+    # -----------------------------------------------------------------
+    apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        cmake \
+        g++ \
+        make \
+        openmpi-bin \
+        openmpi-common \
+        libopenmpi-dev \
+        libhwloc-dev \
+        libomp-dev \
+        rocm-dev \
+        rocm-libs \
+        hipblas \
+        hipfft \
+        rocfft \
+        rocprim \
+        rocblas \
+        rocsolver \
+        rocthrust \
+        hipsparse \
+        miopen-hip \
+        rccl \
+        wget \
+        curl \
+        && rm -rf /var/lib/apt/lists/*
+
+    # -----------------------------------------------------------------
+    # Replace CUDA PyTorch with ROCm PyTorch
+    # -----------------------------------------------------------------
+    pip uninstall -y torch torchvision torchaudio
+    pip install --no-cache-dir \
+        torch --index-url https://download.pytorch.org/whl/rocm7.2.2 \
+        openpmd-api \
+        matplotlib \
+        h5py \
+        scipy
+
+    # -----------------------------------------------------------------
+    # WarpX with ROCm/AMD GPU support + Python bindings
+    # -----------------------------------------------------------------
+    git clone --depth 1 --branch main https://github.com/ECP-WarpX/WarpX.git /opt/WarpX
+    cd /opt/WarpX
+
+    mkdir -p build && cd build
+
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DWARPX_COMPUTE_BACKEND=HIP \
+        -DWARPX_DIMENSION=RZ \
+        -DWARPX_ENABLE_MPI=ON \
+        -DWARPX_ENABLE_OPENMP=OFF \
+        -DWARPX_ENABLE_PYTHON=ON \
+        -DWARPX_USE_PSATD=ON \
+        -DWARPX_PIC=ON
+
+    make -j$(nproc)
+    make install
+
+    # Python path for WarpX modules
+    echo '/opt/WarpX/build/python' > /usr/lib/python3/dist-packages/warpx.pth
+
+    # Cleanup
+    cd /
+    rm -rf /opt/WarpX
+    rm -rf /root/.cache/pip
+
+%environment
+    # ROCm / AMD GPU settings
+    export HIP_VISIBLE_DEVICES=0
+    export HSA_OVERRIDE_GFX_VERSION=9.0.0
+    export PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"
+
+    # WarpX paths
+    export WARPX_BUILD_DIR=/opt/WarpX/build
+    export PATH="${WARPX_BUILD_DIR}:/opt/WarpX/bin:${PATH}"
+    export LD_LIBRARY_PATH="${WARPX_BUILD_DIR}:/opt/WarpX/lib:${LD_LIBRARY_PATH}"
+    export PYTHONPATH="${WARPX_BUILD_DIR}/python:${PYTHONPATH}"
+
+    # MPI
+    export MPI_EXEC=mpirun
+    export OMPI_MCA_btl_tcp_if_include=eth0
+
+%runscript
+    exec python3 "$@"
+
+%test
+    python3 -c "
+import sys; print(f'Python {sys.version}')
+import torch; print(f'PyTorch {torch.__version__}')
+print(f'CUDA available (ROCm): {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'GPU: {torch.cuda.get_device_name(0)}')
+import numpy; print(f'NumPy {numpy.__version__}')
+import openpmd_api; print('openPMD-api OK')
+import matplotlib; print(f'Matplotlib {matplotlib.__version__}')
+print('All dependencies verified.')
+"
