@@ -1,104 +1,406 @@
 Bootstrap: docker
-From: nvcr.io/nvidia/pytorch:25.01-py3
+From: rockylinux/rockylinux:9.7
 
-%post
-    # -----------------------------------------------------------------
-    # System dependencies
-    # -----------------------------------------------------------------
-    apt-get update && apt-get install -y --no-install-recommends \
-        git \
-        cmake \
-        g++ \
-        make \
-        openmpi-bin \
-        openmpi-common \
-        libopenmpi-dev \
-        libhwloc-dev \
-        libomp-dev \
-        rocm-dev \
-        rocm-libs \
-        hipblas \
-        hipfft \
-        rocfft \
-        rocprim \
-        rocblas \
-        rocsolver \
-        rocthrust \
-        hipsparse \
-        miopen-hip \
-        rccl \
-        wget \
-        curl \
-        && rm -rf /var/lib/apt/lists/*
+%labels
+    APPLICATION_NAME Plasma Physics Simulation
+    AUTHOR_NAME Denis Bertini
+    AUTHOR_EMAIL D.Bertini@gsi.de
+    YEAR 2025
 
-    # -----------------------------------------------------------------
-    # Replace CUDA PyTorch with ROCm PyTorch
-    # -----------------------------------------------------------------
-    pip uninstall -y torch torchvision torchaudio
-    pip install --no-cache-dir \
-        torch --index-url https://download.pytorch.org/whl/rocm7.2.2 \
-        openpmd-api \
-        matplotlib \
-        h5py \
-        scipy
+%help
+    Container for Plasma Physics Simulations on AMD MI-100 GPUs.
+    + It includes latest version of openMPI compiled with:
+              - latest UCX library
+              - latest Lustre 2.16 (el9)  client
+    + in order to use efficiently on Virgo:
+            - the Infiniband interconnect Fabric.
+	    - the Lustre filesystem
+    + ROCM 7.2 runtime library  	    
 
-    # -----------------------------------------------------------------
-    # WarpX with ROCm/AMD GPU support + Python bindings
-    # -----------------------------------------------------------------
-    git clone --depth 1 --branch main https://github.com/ECP-WarpX/WarpX.git /opt/WarpX
-    cd /opt/WarpX
-
-    mkdir -p build && cd build
-
-    cmake .. \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DWARPX_COMPUTE_BACKEND=HIP \
-        -DWARPX_DIMENSION=RZ \
-        -DWARPX_ENABLE_MPI=ON \
-        -DWARPX_ENABLE_OPENMP=OFF \
-        -DWARPX_ENABLE_PYTHON=ON \
-        -DWARPX_USE_PSATD=ON \
-        -DWARPX_PIC=ON
-
-    make -j$(nproc)
-    make install
-
-    # Python path for WarpX modules
-    echo '/opt/WarpX/build/python' > /usr/lib/python3/dist-packages/warpx.pth
-
-    # Cleanup
-    cd /
-    rm -rf /opt/WarpX
-    rm -rf /root/.cache/pip
 
 %environment
-    # ROCm / AMD GPU settings
-    export HIP_VISIBLE_DEVICES=0
-    export HSA_OVERRIDE_GFX_VERSION=9.0.0
-    export PYTORCH_HIP_ALLOC_CONF="expandable_segments:True"
+    # Enable gcc-toolset
+    source scl_source enable gcc-toolset-14
 
-    # WarpX paths
-    export WARPX_BUILD_DIR=/opt/WarpX/build
-    export PATH="${WARPX_BUILD_DIR}:/opt/WarpX/bin:${PATH}"
-    export LD_LIBRARY_PATH="${WARPX_BUILD_DIR}:/opt/WarpX/lib:${LD_LIBRARY_PATH}"
-    export PYTHONPATH="${WARPX_BUILD_DIR}/python:${PYTHONPATH}"
+    export OMPI_DIR=/usr/local
+    export SINGULARITY_OMPI_DIR=$OMPI_DIR
+    export APPTAINERENV_APPEND_PATH=$OMPI_DIR/bin
+    export APPTAINERENV_APPEND_LD_LIBRARY_PATH=$OMPI_DIR/lib:$OMPI_DIR/lib64
+    export PATH=$OMPI_DIR/bin:$PATH
+    export LD_LIBRARY_PATH=$OMPI_DIR/lib:$LD_LIBRARY_PATH
+    export PATH=/usr/local/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+    export PATH=/opt/rocm/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH       
 
-    # MPI
-    export MPI_EXEC=mpirun
-    export OMPI_MCA_btl_tcp_if_include=eth0
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm-7.2.3/llvm/lib:/opt/rocm-7.2.3/llvm/lib64	
+    export PATH=$PATH:/opt/rocm-7.2.3/llvm/bin
+
+    # openMPI specifics
+    export OMPI_MCA_io=romio341
+
+    # epoch + openpmd-api
+    export PY_API=3.12	
+    export PYTHONPATH=/root/.local/lib/python$PY_API/site-packages/
+    export PYTHONPATH=/usr/local/lib/python$PY_API/site-packages/:$PYTHONPATH
+    export PYTHONPATH=/usr/local/lib64/python$PY_API/site-packages/:$PYTHONPATH    
+    export PYTHONPATH=/opt/opmd/openPMD-api/build/lib64/python$PY_API/site-packages:$PYTHONPATH
+    export PYTHONPATH=/opt/epoch/python$PY_API:$PYTHONPATH
+    export PYTHONPATH=/opt/epoch/python$PY_API/sdf-1.0-py$PY_API-linux-x86_64.egg/:$PYTHONPATH   
+    
+%post
+   #
+   # Base upstream software
+   #
+    
+   ## Packages needed but lustre-client
+    dnf install -y epel-release  
+    dnf install -y dkms    
+    dnf -y update
+    
+   ## Base rlx9 
+    dnf install -y dnf-plugins-core
+    dnf config-manager --set-enabled crb
+    dnf groupinstall -y 'Development Tools'
+    dnf install -y wget git bash hostname gcc gcc-gfortran gcc-c++ libatomic make file autoconf-latest automake libtool zlib-devel python3-devel
+    dnf install -y libmnl lsof numactl-libs ethtool tcl tk sqlite-devel
+    dnf install -y sysstat
+    
+   ## Add-ons for python's packages
+    dnf install -y openssl-devel bzip2-devel libffi-devel
+    dnf install -y alternatives
+
+    ## Install packages required by Slurm
+    dnf install -y munge munge-devel munge-libs	
+    dnf install -y mariadb-server mariadb-devel
+    dnf install -y pam-devel perl readline-devel perl-Switch
+    dnf install -y bash-completion 
+
+   ## Packages required for OpenMPI and PMIx
+    dnf install -y libnl3 libnl3-devel
+    dnf install -y libevent libevent-devel
+    dnf install -y rdma-core-devel
+    dnf install -y hwloc-devel
+    dnf install -y libibverbs-devel    
+
+
+   ## Packages add-on for WarpX
+   dnf install -y boost-devel   
+
+## Add-ons for python's packages
+    dnf install -y openssl-devel bzip2-devel libffi-devel
+    dnf install -y alternatives
+
+  #
+  # Install full ROCM stack
+  #
+
+
+# version
+ver=7.2.3
+cat <<EOF >/etc/yum.repos.d/rocm.repo 
+[ROCm-$ver]
+name=ROCm$ver
+baseurl=https://repo.radeon.com/rocm/rhel9/$ver/main
+enabled=1
+priority=50
+gpgcheck=1
+gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key
+EOF
+yum install -y rocm-hip-sdk rocm-openmp-sdk
+
+
+    export PATH=/opt/rocm/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:$LD_LIBRARY_PATH   
+
+
+   #
+   # (Re) Install python package
+   #
+
+    export PY_API=3.12
+    export PY_VERSION=3.12.1
+   # First remove all possible python versions on system 
+
+    #dnf remove -y python36 python38 python39 python311 python312
+
+   # Install the only relevant now 
+     
+    dnf install -y python$PY_API-devel
+    dnf install -y python$PY_API-pip
+    pip3 install --upgrade pip
+
+   #
+   # Set python default
+   #
+   
+   alternatives --install /usr/bin/python upy2 /usr/bin/python$PY_API 99
+   alternatives --install /usr/bin/python3 upy3 /usr/bin/python$PY_API 99
+   alternatives --install /usr/bin/pip upy4 /usr/bin/pip3 99   
+   alternatives --list
+
+   # Check versions of basic packages
+   python --version
+   pip --version
+    
+
+   #
+   # Install secondary python packages
+   # using virtual environment
+   #
+
+   # Initiate environment
+   python -m pip --no-cache-dir install virtualenv
+
+   mkdir /venv
+   virtualenv /venv/plasma
+   source /venv/plasma/bin/activate
+
+   echo '. /venv/plasma/bin/activate' >> $SINGULARITY_ENVIRONMENT
+
+   ## Update python pip.
+   python3 -m pip --no-cache-dir install --upgrade pip
+   python3 -m pip --no-cache-dir install setuptools --upgrade
+
+   ## General packages
+   python3 -m pip --no-cache-dir install setuptools --upgrade
+   python3 -m pip --no-cache-dir install psutil schedule 
+   python3 -m pip --no-cache-dir install SQLAlchemy
+   python3 -m pip --no-cache-dir install dash    
+        
+   ## Install Data Science packages
+   python3 -m pip --no-cache-dir install ipython jupyterlab		   
+   python3 -m pip --no-cache-dir install numpy pandas h5py pyarrow scikit-learn statsmodels matplotlib seaborn plotly yt
+   python3 -m pip --no-cache-dir install recommonmark  kaleido
+   python3 -m pip --no-cache-dir install networkx sphinx sphinx-rtd-theme  
+   python3 -m pip --no-cache-dir install datashader
+    
+   ## Install package specific to PP 
+   python3 -m pip --no-cache-dir install lmfit
+
+   ## Dask
+   ## Dask Dependencies
+   python3 -m pip --no-cache-dir install bokeh graphviz cachey cityhash xxhash crick
+   python3 -m pip --no-cache-dir install cytoolz lz4 mmh3 python-snappy
+   python3 -m pip --no-cache-dir install sparse zarr
+   python3 -m pip --no-cache-dir install fastparquet
+   python3 -m pip --no-cache-dir install pyarrow
+   ## Dask itself
+   python3 -m pip --no-cache-dir install "dask[complete]"
+   python3 -m pip --no-cache-dir install dask-jobqueue --upgrade
+   python3 -m pip --no-cache-dir install dask-labextension
+   python3 -m pip --no-cache-dir install dask-ml    
+
+   ## Install modules needed by pytorch
+   python3 -m pip --no-cache-dir install typing-extensions
+
+   ## Python's packaging libraries Needed for WarpX
+   python3 -m pip --no-cache-dir install build packaging setuptools wheel
+   python3 -m pip --no-cache-dir install cmake 
+   python3 -m pip --no-cache-dir install periodictable numba
+
+   ## Job Monitoring
+   ## Prometheus client API 
+   python3 -m pip --no-cache-dir install prometheus-api-client
+   python3 -m pip --no-cache-dir install Pillow plotly argparse pyranges bs4 rich 
+
+   CUSTOM_ENV=/.singularity.d/env/99-zz_custom_env.sh
+   cat >$CUSTOM_ENV <<EOF
+#!/bin/bash
+PS1="[pp_amdgpu\w \$ "
+EOF
+   chmod 755 $CUSTOM_ENV
+
+   cat <<EOF >/etc/yum.repos.d/lustre-client.repo
+[lustre-client]
+name=Lustre Client
+gpgcheck=0
+baseurl=http://downloads.whamcloud.com/public/lustre/lustre-2.16.1/el9.4/client
+EOF
+yum install -y lustre-client lustre-client-devel
+
+   ## Prior to compilation
+   ## Install and enable gcc-toolset
+   dnf install -y gcc-toolset-14
+   source scl_source enable gcc-toolset-14
+
+
+   # Set up the environment (for the container build process)
+   #export PATH=/usr/local/cuda/bin:${PATH}
+   #export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib:${LD_LIBRARY_PATH}
+ 
+   #
+   # PMIx 
+   #
+
+   export VPMIX_VERSION=6.0.0
+   echo "Installing PMIx version: " $VPMIX_VERSION	
+   mkdir -p /opt/pmix
+   cd /opt/pmix
+   wget -c https://github.com/openpmix/openpmix/releases/download/v$VPMIX_VERSION/pmix-$VPMIX_VERSION.tar.gz
+   tar xf pmix-$VPMIX_VERSION.tar.gz
+   cd pmix-$VPMIX_VERSION
+   ./configure --prefix=/usr/local --with-munge=/usr && \
+   make -j$(nproc)
+   make -j$(nproc) install      
+   #rm -rf /tmp/pmix
+
+   export PRRTE_VERSION=4.0.0
+   echo "Installing PRRTE version: " $PRRTE_VERSION	
+   mkdir -p /opt/prrte
+   cd /opt/prrte
+   wget -c https://github.com/openpmix/prrte/releases/download/v$PRRTE_VERSION/prrte-$PRRTE_VERSION.tar.gz
+   tar xf prrte-$PRRTE_VERSION.tar.gz
+   cd prrte-$PRRTE_VERSION
+   ./configure --prefix=/usr/local --with-pmix=/usr/local --with-slurm  && \
+   make -j$(nproc)
+   make -j$(nproc) install      
+   #rm -rf /tmp/prrte
+
+
+   #
+   # UCX
+   #
+
+   export UCX_VERSION=1.20.0
+   echo "Installing UCX version:  " $UCX_VERSION
+   cd /
+   mkdir -p /var/tmp && wget -q -nc --no-check-certificate -P /var/tmp https://github.com/openucx/ucx/releases/download/v$UCX_VERSION/ucx-$UCX_VERSION.tar.gz
+   mkdir -p /var/tmp && tar -x -f /var/tmp/ucx-$UCX_VERSION.tar.gz -C /var/tmp -z
+   cd /var/tmp/ucx-$UCX_VERSION &&   ./configure --prefix=/usr/local/ucx --disable-assertions --disable-debug --disable-doxygen-doc --disable-logging --disable-params-check --enable-optimizations --enable-mt --without-cuda
+   make -j$(nproc)
+   make -j$(nproc) install
+   rm -rf /var/tmp/ucx-$UCX_VERSION /var/tmp/ucx-$UCX_VERSION.tar.gz
+
+   #
+   # OpenMPI installation
+   #
+ 
+   export OMPI_DIR=/usr/local
+   export OMPI_VERSION=5.0.9
+   export OMPI_URL="https://download.open-mpi.org/release/open-mpi/v5.0/openmpi-$OMPI_VERSION.tar.bz2"
+   echo "Installing OpenMPI version: " $OMPI_VERSION
+   mkdir -p /root/ompi
+   cd /root/ompi
+   wget -c -O openmpi-$OMPI_VERSION.tar.bz2 $OMPI_URL && tar -xjf openmpi-$OMPI_VERSION.tar.bz2
+
+   # Compile and install
+   cd /root/ompi/openmpi-$OMPI_VERSION
+   ./configure --prefix=$OMPI_DIR --with-pmix=/usr/local --with-prrte=/usr/local --with-libevent=/usr --with-ompi-pmix-rte --with-orte=no --disable-oshmem --enable-mpirun-prefix-by-default --enable-shared  --without-verbs --with-hwloc --with-ucx=/usr/local/ucx --with-lustre --with-slurm --enable-mca-no-build=btl-uct --disable-sphinx
+   make -j$(nproc)
+   make -j$(nproc) install
+
+   # Set env variables so we can compile our applications
+   export PATH=$OMPI_DIR/bin:$PATH
+   export LD_LIBRARY_PATH=$OMPI_DIR/lib:$LD_LIBRARY_PATH
+   export MANPATH=$OMPI_DIR/share/man:$MANPATH
+   export COMPILER=gfortran
+   export PYTHONPATH=/root/.local/lib/python$PY_API/site-packages:$PYTHONPATH
+
+
+  # Install MPI based python modules
+   export PATH=/usr/local/bin:$PATH
+   export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+   python3 -m pip --no-cache-dir install mpi4py
+   python3 -m pip --no-cache-dir install h5py   
+   python3 -m pip --no-cache-dir install dask_mpi --upgrade
+    
+
+
+  #
+  # Cmake
+  #
+  
+  export CMAKE_DIR=/usr/local
+  export CMAKE_VERSION=4.1.1
+  echo "Installing CMake version: " $CMAKE_VERSION
+  mkdir -p /tmp/cmake
+  cd /tmp/cmake
+  #wget -q -nc --no-check-certificate -P /root/cmake  https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-linux-x86_64.sh
+  curl -OL https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-linux-x86_64.sh
+  /bin/sh /tmp/cmake/cmake-$CMAKE_VERSION-linux-x86_64.sh --prefix=/usr/local --skip-license 
+  rm -rf /tmp/cmake
+  PATH=/usr/local/bin:$PATH
+
+
+
+
+  #
+  # Install HDF5
+  #
+  
+  #export HDF5_VERSION=1.14.3
+  export HDF5_VERSION=1.14.4-3
+  echo "Installing HDF5 version: " $HDF5_VERSION
+  cd /tmp
+  wget -q -nc --no-check-certificate -L https://support.hdfgroup.org/ftp/HDF5/releases/hdf5-1.14/hdf5-1.14.4/src/hdf5-$HDF5_VERSION.tar.gz 
+  tar -x -f hdf5-$HDF5_VERSION.tar.gz
+  cd hdf5-$HDF5_VERSION/
+  ./configure --prefix=/usr/local/ --enable-parallel --enable-fortran --enable-fortran2003 --enable-shared CC=/usr/local/bin/mpicc CXX=/usr/local/bin/mpicxx FC=/usr/local/bin/mpif90 
+  make -j$(nproc) 
+  make -j$(nproc) install 
+  rm -rf /tmp/hdf5-$HDF5_VERSION/
+
+  #
+  # ADIOS2
+  #
+  
+  export ADIOS_VERSION=2.10.2
+  echo "Installing ADIOS2 version: " $ADIOS_VERSION
+  rm -rf /tmp/adios
+  mkdir -p /tmp/adios
+  cd /tmp/adios
+  git clone https://github.com/ornladios/ADIOS2.git
+  cd ADIOS2
+  git checkout v$ADIOS_VERSION
+  mkdir adios2-build
+  cd adios2-build
+  cmake ../ -DCMAKE_PREFIX_INSTALL=/usr/local/ -DADIOS2_BUILD_EXAMPLES=OFF -DADIOS2_BUILD_TESTING=OFF -DADIOS2_USE_Fortran=ON -DADIOS2_USE_HDF5=OFF -DCMAKE_CXX_FLAGS=-fPIC 
+  make -j$(nproc)
+  make -j$(nproc) install  
+  rm -rf /tmp/adios
+  PATH=/usr/local/bin:$PATH   
+
+  #
+  # openPMD-API
+  #
+  
+  mkdir -p /opt/opmd
+  cd /opt/opmd
+  git clone  https://github.com/openPMD/openPMD-api.git openPMD-api
+  cd /opt/opmd/openPMD-api
+  git checkout 0.16.1
+  mkdir -p /opt/opmd/openPMD-api/build
+  cd /opt/opmd/openPMD-api/build
+  cmake -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DopenPMD_USE_ADIOS2=ON -DopenPMD_USE_ADIOS1=OFF -DopenPMD_USE_PYTHON=ON /opt/opmd/openPMD-api
+  cmake --build /opt/opmd/openPMD-api/build --target install -- -j$(nproc)
+
+  # OpenPMD_Viewer 
+   python3 -m pip --no-cache-dir install openpmd-viewer 
+
+  #
+  # WarpX
+  # With openMPI + OpenMP + AMD MI-100 GPUs
+  #
+  export WARPX_VERSION=26.05  
+  echo "INstalling WarpX version: " $WARPX_VERSION
+  
+  rm   -rf /opt/warp
+  mkdir -p /opt/warp
+  cd /opt/warp
+  git clone https://github.com/ECP-WarpX/WarpX.git
+  cd WarpX
+  git checkout $WARPX_VERSION
+ 
+  # Build all dimensions 1,2,rz,3 together
+  CXX=/opt/rocm/bin/hipcc CC=/opt/rocm/bin/amdclang cmake -S . -B build -DWarpX_DIMS="1;2;RZ;3"  -D WarpX_COMPUTE=HIP -D AMReX_AMD_ARCH=gfx908 -D AMReX_TINY_PROFILE=FALSE -D MPI_C_COMPILER=/usr/local/bin/mpicc -D MPI_CXX_COMPILER=/usr/local/bin/mpicxx -DWarpX_OPENPMD=ON -DWarpX_PYTHON=ON -DWarpX_QED=ON  -DWarpX_QED_TABLE_GEN=ON -DWarpX_QED_TOOLS=ON -DCMAKE_INSTALL_PREFIX=/usr/local/ 
+
+  # Install
+  cmake --build build -j 10 --target install
+  #rm -rf /tmp/warp
+
 
 %runscript
-    exec python3 "$@"
-
-%test
-    python3 -c "
-import sys; print(f'Python {sys.version}')
-import torch; print(f'PyTorch {torch.__version__}')
-print(f'CUDA available (ROCm): {torch.cuda.is_available()}')
-if torch.cuda.is_available():
-    print(f'GPU: {torch.cuda.get_device_name(0)}')
-import numpy; print(f'NumPy {numpy.__version__}')
-import openpmd_api; print('openPMD-api OK')
-import matplotlib; print(f'Matplotlib {matplotlib.__version__}')
-print('All dependencies verified.')
-"
+exec /bin/bash "$@"
+%startscript
+exec /bin/bash "$@"
