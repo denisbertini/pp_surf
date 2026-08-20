@@ -79,6 +79,7 @@ srun \
     --gres=gpu:mi100:1 \
     apptainer exec --rocm \
         --bind "${WORK_DIR}:${WORK_DIR}" \
+        --bind "/lustre/rz/dbertini/hydra/scripts/qed_tables:/lustre/rz/dbertini/hydra/scripts/qed_tables" \
         --cwd "${WORK_DIR}" \
         "${CONTAINER}" \
         mpirun -np ${SLURM_NTASKS} \

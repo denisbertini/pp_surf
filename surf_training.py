@@ -218,7 +218,7 @@ class InSituTrainer:
 
     def __init__(self, model, optimizer, input_normalizer, output_normalizer,
                   train_interval=1000, min_particles=100, max_batch_size=5000,
-                  particle_name="beam_stage_0", checkpoint_interval=20000,
+                   particle_name="beam", checkpoint_interval=20000,
                   z_filter_min=None, z_filter_max=None, device="cuda"):
         self.model = model
         self.optimizer = optimizer
@@ -630,267 +630,98 @@ class InSituTrainer:
 
 def setup_simulation():
     """
-    Configure the WarpX laser-plasma accelerator simulation using the full
-    PICMI baseline from the WarpX ML dataset training workflow.
-
-    Critical physics components:
-        - Boosted frame (gamma_boost=60)
-        - Cartesian 3D grid with moving window
-        - Parabolic plasma density profile with cosine ramps
-        - 15 acceleration stages with per-stage beam gamma ramp-up
-        - PSATD solver with multi-J algorithm (4 passes, 2 depositions)
-        - Gaussian laser with antenna injection
-        - Beam injection through plane with pseudo-random layout
-        - Stage spacing with focusing lens parameters
+    Mapped from WarpX text input file (CKC solver, QED, gamma_boost=10):
+    - Grid: 408 x 408 x 15488 cells
+    - Domain: [-150, 150] um x [-120, 1] um
+    - Plasma: 1e23 m^-3 with 8mm cosine ramp
+    - Beam: Gaussian bunch (uz_m = 2000)
     """
-
-    import math
-
-    # --- Physical constants ---
     c = picmi.constants.c
     q_e = picmi.constants.q_e
-    m_e = picmi.constants.m_e
-    ep0 = picmi.constants.ep0
-
-    # --- Grid parameters ---
-    nx = 128
-    ny = 128
-    nz = 35328
-
-    # --- Computational domain ---
-    rmax = 128e-6
-    zmin = -180e-6
-    zmax = 0.0
-
-    # --- Boosted frame ---
-    gamma_boost = 60.0
-    # --- Plasma parameters ---
-    plasma_rlim = 100.0e-6
-    n0 = 1.7e23
-    L_plasma_bulk = 0.28
-    L_ramp = 1.0e-9
-    L_stage = L_plasma_bulk + 2 * L_ramp
-
-    # --- Focusing / stage spacing ---
-    N_stage = 15
-    lens_focal_length = 0.015
-    lens_width = 0.003
-    stage_spacing = L_plasma_bulk + 2 * lens_focal_length
-
-    # --- Beam parameters ---
-    N_beam_particles = int(1e6)
-    beam_charge = -10.0e-15
-    beam_centroid_z = -107.0e-6
-    beam_rms_z = 2.0e-6
-    beam_gammas = [1960 + 13246 * i for i in range(N_stage)]
-
-    # --- Laser parameters ---
-    antenna_z = -1e-9
-    profile_t_peak = 1.46764864e-13
-
-    # --- MPI process distribution ---
-    num_procs = [1, 1, 256]
 
     # =================================================================
-    # Grid with moving window
+    # 1. Grid: Cartesian 3D with moving window
     # =================================================================
     grid = picmi.Cartesian3DGrid(
-        number_of_cells=[nx, ny, nz],
-        guard_cells=[11, 11, 12],
-        lower_bound=[-rmax, -rmax, zmin],
-        upper_bound=[rmax, rmax, zmax],
-        lower_boundary_conditions=['periodic', 'periodic', 'damped'],
-        upper_boundary_conditions=['periodic', 'periodic', 'damped'],
+        number_of_cells=[408, 408, 15488],
+        lower_bound=[-150e-6, -150e-6, -120e-6],
+        upper_bound=[ 150e-6,  150e-6,    1e-6],
+        lower_boundary_conditions=['periodic', 'periodic', 'pml'],
+        upper_boundary_conditions=['periodic', 'periodic', 'pml'],
         lower_boundary_conditions_particles=['periodic', 'periodic', 'absorbing'],
         upper_boundary_conditions_particles=['periodic', 'periodic', 'absorbing'],
         moving_window_velocity=[0.0, 0.0, c],
-        warpx_max_grid_size=256,
+        warpx_max_grid_size=64,
         warpx_blocking_factor=32,
     )
 
     # =================================================================
-    # Plasma: parabolic density profile with cosine ramps per stage
+    # 2. Solver: CKC (Courant, 0.99)
     # =================================================================
-    kp = q_e / c * math.sqrt(n0 / (m_e * ep0))
-    Rc = 40.0e-6
-    pi = math.pi
-
-    def get_stage_plasma(stage_idx, stage_zmin, stage_zmax,
-                         Lplus=L_ramp, Lp=L_plasma_bulk, Lminus=L_ramp):
-        """Parabolic transverse density profile with ramp-up and ramp-down."""
-        density_expr = (
-            f'n0*(1.+4.*(x**2+y**2)/(kp**2*Rc**4))'
-            f'*(0.5*(1.-cos(pi*(z-{stage_zmin})/Lplus)))*((z-{stage_zmin})<Lplus)'
-            f'+n0*(1.+4.*(x**2+y**2)/(kp**2*Rc**4))'
-            f'*((z-{stage_zmin})>=Lplus)*((z-{stage_zmin})<(Lplus+Lp))'
-            f'+n0*(1.+4.*(x**2+y**2)/(kp**2*Rc**4))'
-            f'*(0.5*(1.+cos(pi*((z-{stage_zmin})-Lplus-Lp)/Lminus)))'
-            f'*((z-{stage_zmin})>=(Lplus+Lp))*((z-{stage_zmin})<(Lplus+Lp+Lminus))'
-        )
-
-        dist = picmi.AnalyticDistribution(
-            density_expression=density_expr,
-            pi=pi,
-            n0=n0,
-            kp=kp,
-            Rc=Rc,
-            Lplus=Lplus,
-            Lp=Lp,
-            Lminus=Lminus,
-            lower_bound=[-plasma_rlim, -plasma_rlim, stage_zmin],
-            upper_bound=[plasma_rlim, plasma_rlim, stage_zmax],
-            fill_in=True,
-        )
-
-        electrons = picmi.Species(
-            particle_type='electron',
-            name=f'electrons{stage_idx}',
-            initial_distribution=dist,
-        )
-        ions = picmi.Species(
-            particle_type='proton',
-            name=f'ions{stage_idx}',
-            initial_distribution=dist,
-        )
-        return electrons, ions
-
-    species_list = []
-    for i_stage in range(1):
-        zmin_s = i_stage * stage_spacing
-        zmax_s = zmin_s + L_stage
-        electrons, ions = get_stage_plasma(i_stage + 1, zmin_s, zmax_s)
-        species_list.append(electrons)
-        species_list.append(ions)
-
-    # =================================================================
-    # Beam: GaussianBunch per stage, injected through plane
-    # =================================================================
-    beams = []
-    for i_stage in range(N_stage):
-        beam_gamma = beam_gammas[i_stage]
-        sigma_gamma = 0.06 * beam_gamma
-
-        dist = picmi.GaussianBunchDistribution(
-            n_physical_particles=abs(beam_charge) / q_e,
-            rms_bunch_size=[2.0e-6, 2.0e-6, beam_rms_z],
-            rms_velocity=[8 * c, 8 * c, sigma_gamma * c],
-            centroid_position=[0.0, 0.0, beam_centroid_z],
-            centroid_velocity=[0.0, 0.0, beam_gamma * c],
-        )
-
-        beam = picmi.Species(
-            particle_type='electron',
-            name=f'beam_stage_{i_stage}',
-            initial_distribution=dist,
-        )
-        beams.append(beam)
-
-    # =================================================================
-    # Laser: GaussianLaser with antenna injection
-    # =================================================================
-    def get_laser(az, t_peak, fill_in=True):
-        focal_distance = 0.0
-        laser = picmi.GaussianLaser(
-            wavelength=0.8e-6,
-            waist=36e-6,
-            duration=7.33841e-14,
-            focal_position=[0.0, 0.0, focal_distance + az],
-            centroid_position=[0.0, 0.0, az - c * t_peak],
-            propagation_direction=[0.0, 0.0, 1.0],
-            polarization_direction=[0.0, 1.0, 0.0],
-            a0=2.36,
-            fill_in=fill_in,
-        )
-        antenna = picmi.LaserAntenna(
-            position=[0.0, 0.0, az],
-            normal_vector=[0.0, 0.0, 1.0],
-        )
-        return laser, antenna
-
-    lasers = [get_laser(antenna_z, profile_t_peak, fill_in=False)]
-
-    # =================================================================
-    # PSATD solver: multi-J algorithm (4 z-passes, 2 depositions)
-    # =================================================================
-    n_pass_z = 4
-    smoother = picmi.BinomialSmoother(n_pass=[1, 1, n_pass_z])
-    stencil_order = [8, 8, 16]
-    grid_type = 'hybrid'
-
     solver = picmi.ElectromagneticSolver(
         grid=grid,
-        method='PSATD',
-        cfl=0.9999,
-        source_smoother=smoother,
-        stencil_order=stencil_order,
-        galilean_velocity=None,
-        warpx_psatd_update_with_rho=True,
-        warpx_current_correction=False,
-        divE_cleaning=True,
-        warpx_psatd_J_in_time='linear',
+        method='CKC',
+        cfl=0.99,
     )
 
     # =================================================================
-    # Reduced diagnostic for beam monitoring (lightweight)
+    # 3. Plasma: Electrons & Positrons (8mm cosine ramp)
     # =================================================================
-    beamrel_red_diag = picmi.ReducedDiagnostic(
-        diag_type='BeamRelevant',
-        name='beamrel',
-        species=beams[0],
-        period=1,
+    plasma_dist = picmi.AnalyticDistribution(
+        density_expression="( (z<8e-3) && (z>0.0) ) * 0.5 * (1 - cos(3.141592653589793 * z / 8e-3)) * 1e23 + (z>=8e-3) * 1e23",
+        lower_bound=[-70e-6, -70e-6, -100e-6],
+        upper_bound=[ 70e-6,  70e-6,  200e-6],
+        fill_in=True,
+    )
+
+    plasma_e = picmi.Species(
+        particle_type='electron',
+        name='plasma_e',
+        initial_distribution=plasma_dist,
+    )
+
+    plasma_p = picmi.Species(
+        particle_type='positron',
+        name='plasma_p',
+        initial_distribution=plasma_dist,
     )
 
     # =================================================================
-    # Simulation object
+    # 4. Beam: Gaussian Bunch (uz_m = 2000)
+    # NOTE: rigid_advance is FALSE by default in PICMI, so the beam 
+    # will interact with fields and provide useful training data.
+    # =================================================================
+    beam_dist = picmi.GaussianBunchDistribution(
+        n_physical_particles=5e-10 / q_e,
+        rms_bunch_size=[0.5e-6, 0.5e-6, 1e-6],
+        rms_velocity=[2.0 * c, 2.0 * c, 200.0 * c],
+        centroid_position=[0.0, 0.0, -100e-6],
+        centroid_velocity=[0.0, 0.0, 2000.0 * c],
+    )
+
+    beam = picmi.Species(
+        particle_type='electron',
+        name='beam',
+        initial_distribution=beam_dist,
+    )
+
+    # =================================================================
+    # 5. Simulation Object
     # =================================================================
     sim = picmi.Simulation(
         solver=solver,
-        warpx_numprocs=num_procs,
-        warpx_compute_max_step_from_btd=True,
-        verbose=2,
-        particle_shape='cubic',
-        gamma_boost=gamma_boost,
-        warpx_charge_deposition_algo='standard',
-        warpx_current_deposition_algo='direct',
-        warpx_field_gathering_algo='momentum-conserving',
-        warpx_particle_pusher_algo='vay',
-        warpx_amrex_the_arena_is_managed=False,
-        warpx_amrex_use_gpu_aware_mpi=True,
-        warpx_do_multi_J=True,
-        warpx_do_multi_J_n_depositions=2,
-        warpx_grid_type=grid_type,
-        warpx_field_centering_order=[16, 16, 16],
-        warpx_current_centering_order=[16, 16, 16],
+        warpx_numprocs=[1, 1, 24],
+        particle_shape=3,
+        gamma_boost=10.0,
+        warpx_boost_direction='z',
+        verbose=1,
     )
 
-    # Add plasma species (gridded layout)
-    for sp in species_list:
-        sim.add_species(
-            sp,
-            layout=picmi.GriddedLayout(
-                grid=grid,
-                n_macroparticle_per_cell=[2, 2, 2],
-            ),
-        )
-
-    # Add beam species through plane (pseudo-random layout)
-    for i_stage in range(N_stage):
-        sim.add_species_through_plane(
-            species=beams[i_stage],
-            layout=picmi.PseudoRandomLayout(
-                grid=grid,
-                n_macroparticles=N_beam_particles,
-            ),
-            injection_plane_position=0.0,
-            injection_plane_normal_vector=[0.0, 0.0, 1.0],
-        )
-
-    # Add laser with antenna
-    laser, laser_antenna = lasers[0]
-    sim.add_laser(laser, injection_method=laser_antenna)
-
-    # Add diagnostics
-    sim.add_diagnostic(beamrel_red_diag)
+    # Add plasma species
+    sim.add_species(plasma_e, layout=picmi.PseudoRandomLayout(n_macroparticles_per_cell=1))
+    sim.add_species(plasma_p, layout=picmi.PseudoRandomLayout(n_macroparticles_per_cell=1))
+    # Add beam species
+    sim.add_species(beam, layout=picmi.PseudoRandomLayout(n_macroparticles=1000))
 
     sim.initialize_inputs()
 
